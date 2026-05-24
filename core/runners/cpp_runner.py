@@ -1,4 +1,4 @@
-from base import AbstractRunner, ExecutionResult
+from core.runners.base import AbstractRunner, ExecutionResult
 import uuid
 import time
 import subprocess

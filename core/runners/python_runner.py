@@ -1,5 +1,5 @@
 from typing import Optional
-from base import AbstractRunner, ExecutionResult
+from core.runners.base import AbstractRunner, ExecutionResult
 import subprocess
 import sys
 import time
