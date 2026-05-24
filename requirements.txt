@@ -1,2 +1,4 @@
+chromadb
 docker
 ollama
+sentence-transformers

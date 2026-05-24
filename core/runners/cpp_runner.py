@@ -1,73 +1,86 @@
-from core.runners.base import AbstractRunner, ExecutionResult
-import uuid
-import time
-import subprocess
+from __future__ import annotations
+
 import re
-import os
+from pathlib import Path
+from typing import Optional
+
+from core.runners.base import AbstractRunner, ExecutionResult
+from core.sandbox.docker_engine import DockerSandboxWrapper
+
 
 class CPPRunner(AbstractRunner):
-    def __init__(self, file_path: str):
-        self.file_path = file_path
+    _TIMEOUT_EXIT_CODE: int = 124
+    _TEMP_EXEC_PATH: str = "/tmp/temp_exec"
+    _COMPILE_ERROR_PATTERN = re.compile(r":(\d+):\d*:?\s*error:")
+
+    def __init__(self, file_path: str) -> None:
+        self.file_path: str = file_path
+        self.filename: str = Path(file_path).name
+        self.sandbox: DockerSandboxWrapper = DockerSandboxWrapper()
 
     def execute(self, timeout: int = 5) -> ExecutionResult:
-        unique_id = uuid.uuid4().hex
-        executable = f"./proc_{unique_id}"
-        cmd = ["g++", self.file_path, "-o", executable]
-        try:
-            try:
-                c_res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-                if c_res.returncode != 0:
-                    match = re.search(r':(\d+):', c_res.stderr)
-                    line_no = int(match.group(1)) if match else None
+        temp_exec = self._TEMP_EXEC_PATH
+        shell_pipeline = (
+            f"g++ -Wall {self.filename} -o {temp_exec} && {temp_exec}"
+        )
+        command: list[str] = ["/bin/sh", "-c", shell_pipeline]
+        exit_code, stdout, stderr, runtime_ms = self.sandbox.run_in_container(
+            self.file_path,
+            command,
+            timeout,
+        )
 
-                    return ExecutionResult(
-                        success=False,
-                        stage="Compilation",
-                        stdout=c_res.stdout,
-                        stderr=c_res.stderr,
-                        runtime_ms=0.0,
-                        exit_code=c_res.returncode,
-                        error="Compilation Failed",
-                        line_number=line_no
-                    )
-            except subprocess.TimeoutExpired:
-                return ExecutionResult(False, "Compilation", "", "Timeout", 0.0, 124, "Compiler Timed Out")
-            except Exception as e:
-                return ExecutionResult(False, "System", "", str(e), 0.0, 1, "Internal Script Error")
+        if exit_code == self._TIMEOUT_EXIT_CODE:
+            return ExecutionResult(
+                success=False,
+                stage="timeout",
+                stdout=stdout,
+                stderr=stderr,
+                runtime_ms=runtime_ms,
+                exit_code=exit_code,
+                error="TimeoutError",
+            )
 
-            os.chmod(executable, 0o755)
+        success = exit_code == 0
+        if success:
+            return ExecutionResult(
+                success=True,
+                stage="Execution",
+                stdout=stdout,
+                stderr=stderr,
+                runtime_ms=runtime_ms,
+                exit_code=exit_code,
+            )
 
-            try:
-                start = time.time()
-                r_res = subprocess.run([executable], capture_output=True, text=True, timeout=timeout)
-                end = time.time()
-                runtime_ms = (end - start) * 1000
+        if self._is_compilation_failure(stderr):
+            return ExecutionResult(
+                success=False,
+                stage="Compilation",
+                stdout=stdout,
+                stderr=stderr,
+                runtime_ms=runtime_ms,
+                exit_code=exit_code,
+                error="Compilation Failed",
+                line_number=self._extract_compile_line_number(stderr),
+            )
 
-                if r_res.returncode != 0:
-                    return ExecutionResult(
-                        success=False,
-                        stage="Execution",
-                        stdout=r_res.stdout,
-                        stderr=r_res.stderr,
-                        runtime_ms=runtime_ms,
-                        exit_code=r_res.returncode,
-                        error="Runtime Error"
-                    )
-                return ExecutionResult(
-                    success=True,
-                    stage="Execution",
-                    stdout=r_res.stdout,
-                    stderr=r_res.stderr,
-                    runtime_ms=runtime_ms,
-                    exit_code=0
-                )
-            except subprocess.TimeoutExpired:
-                return ExecutionResult(False, "Execution", "", "", float(timeout * 1000), 124, "Time Limit Exceeded")
-            except Exception as e:
-                return ExecutionResult(False, "System", "", str(e), 0.0, 1, "Execution Start Failed")
-        finally:
-            try:
-                os.remove(executable)
-            except OSError:
-                pass
+        return ExecutionResult(
+            success=False,
+            stage="Execution",
+            stdout=stdout,
+            stderr=stderr,
+            runtime_ms=runtime_ms,
+            exit_code=exit_code,
+            error="Runtime Error",
+        )
 
+    @classmethod
+    def _is_compilation_failure(cls, stderr: str) -> bool:
+        return cls._COMPILE_ERROR_PATTERN.search(stderr) is not None
+
+    @staticmethod
+    def _extract_compile_line_number(stderr: str) -> Optional[int]:
+        match = re.search(r":(\d+):", stderr)
+        if match:
+            return int(match.group(1))
+        return None

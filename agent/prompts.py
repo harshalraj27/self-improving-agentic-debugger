@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from core.runners.base import ExecutionResult
 
 SYSTEM_PROMPT: str = (
@@ -9,7 +11,11 @@ SYSTEM_PROMPT: str = (
 )
 
 
-def generate_user_prompt(source_code: str, result: ExecutionResult) -> str:
+def generate_user_prompt(
+    source_code: str,
+    result: ExecutionResult,
+    past_fix: Optional[dict[str, str]] = None,
+) -> str:
     sections: list[str] = [
         "Source file:",
         source_code,
@@ -26,6 +32,17 @@ def generate_user_prompt(source_code: str, result: ExecutionResult) -> str:
         sections.extend(["", f"Error: {result.error}"])
     if result.line_number is not None:
         sections.extend(["", f"Line: {result.line_number}"])
+    if past_fix:
+        sections.extend(
+            [
+                "",
+                "Similar past failure:",
+                past_fix.get("error_trace", ""),
+                "",
+                "Successful patch from memory:",
+                past_fix.get("successful_patch", ""),
+            ]
+        )
     sections.extend(
         [
             "",
