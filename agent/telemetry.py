@@ -1,16 +1,18 @@
+from __future__ import annotations
+
 import json
 import time
 from pathlib import Path
 import difflib
 from dataclasses import dataclass, asdict
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 @dataclass
 class StateEvent:
     state: str
     cycle_index: int
-    timestamp_offset_ms: int
-    duration_ms: int
+    timestamp_offset_ms: float
+    duration_ms: float
     metadata: dict
 
     def to_dict(self) -> Dict[str, Any]:
@@ -20,8 +22,8 @@ class TelemetryTracer:
     def __init__(self, job_id: str):
         self.job_id = job_id
         self.start_wall_time: float = time.perf_counter()
-        self.trajectory: List[StateEvent] = []
-        self.active_state: Optional[dict] = None
+        self.trajectory: List[Dict[str, Any]] = []
+        self.active_state: Optional[Dict[str, Any]] = None
 
     def start_state_capture(self, state_name: str, cycle_index: int) -> None:
         current_time = time.perf_counter()
@@ -51,14 +53,13 @@ class TelemetryTracer:
         )
 
         self.trajectory.append(event_obj.to_dict())
-
         self.active_state = None
 
     @staticmethod
     def _estimate_tokens(payload: str) -> float:
         return len(payload) / 4.0
 
-    def _calculate_metrics_and_deltas(self, initial_code: str, final_code: str) -> tuple:
+    def _calculate_metrics_and_deltas(self, initial_code: str, final_code: str) -> Tuple[float, float]:
         total_tokens = 0.0
         for event in self.trajectory:
             if event.get("state") == "ACTION_SELECTED":
@@ -71,7 +72,6 @@ class TelemetryTracer:
 
         matcher = difflib.SequenceMatcher(None, initial_code, final_code)
         ratio = matcher.ratio()
-
         delta_code_similarity = 1.0 - ratio
 
         return total_tokens, delta_code_similarity
@@ -80,7 +80,7 @@ class TelemetryTracer:
         if total_tokens == 0.0:
             efficiency_score = 0.0
         else:
-            efficiency_score = (delta_code_similarity / total_tokens) * 1000
+            efficiency_score = (delta_code_similarity / total_tokens) * 1000.0
 
         total_execution_time_ms = (time.perf_counter() - self.start_wall_time) * 1000.0
 
@@ -103,14 +103,12 @@ class TelemetryTracer:
 
     def finalize_trace(self, success: bool, initial_code: str, final_code: str) -> Path:
         total_tokens, delta_code_similarity = self._calculate_metrics_and_deltas(initial_code, final_code)
-
         document_payload = self._build_payload(success, total_tokens, delta_code_similarity)
 
         base_dir = Path("data/telemetry")
         base_dir.mkdir(parents=True, exist_ok=True)
 
         file_path = base_dir / f"trace_{self.job_id}.json"
-
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(document_payload, f, indent=2)
 
