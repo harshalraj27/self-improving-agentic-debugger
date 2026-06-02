@@ -180,7 +180,7 @@ def run_evaluation_suite():
             "| Target Asset Filename | Language | Success Status | Execution Latency | Retries | Efficiency Rank |\n")
         rf.write("| --- | --- | --- | --- | --- | --- |\n")
         for rec in evaluation_records:
-            status_symbol = "✅ PASS" if rec["success"] else "❌ FAIL"
+            status_symbol = "PASS" if rec["success"] else "FAIL"
             rf.write(
                 f"| {rec['filename']} "
                 f"| {rec['language'].upper()} "
