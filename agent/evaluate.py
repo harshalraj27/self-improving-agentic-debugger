@@ -5,6 +5,8 @@ import time
 from difflib import SequenceMatcher
 from pathlib import Path
 import matplotlib.pyplot as plt
+from agent.agent import Agent
+import uuid
 
 class DummyAgent:
     def __init__(self, target_file_path: Path):
@@ -97,7 +99,9 @@ def run_evaluation_suite():
 
         shutil.copy2(asset_path, scratch_file_target)
 
-        agent_instance = DummyAgent(scratch_file_target)
+        current_job_id = f"eval_{int(time.time() * 1000)}_{asset_path.stem}"
+
+        agent_instance = Agent(file_path=str(scratch_file_target), max_retries=5, job_id=current_job_id)
         agent_instance.run()
 
         associated_job_id = agent_instance.job_id
@@ -114,10 +118,10 @@ def run_evaluation_suite():
         overall_metrics = trace_data.get("overall_metrics", {})
         trajectory = trace_data.get("trajectory", [])
 
-        success_outcome = overall_metrics.get("system_convergence_success", False)
+        success_outcome = overall_metrics.get("success", False)
         total_latency = overall_metrics.get("total_execution_time_ms", 0.0)
         retry_cycles = overall_metrics.get("total_retry_cycles", 0)
-        efficiency_score = overall_metrics.get("token_expenditure_efficiency", 0.0)
+        efficiency_score = overall_metrics.get("efficiency_score", 0.0)
 
         rag_hits_count = 0
         for step in trajectory:

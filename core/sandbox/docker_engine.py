@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Final
-
+from typing import Final, Tuple
+import requests
 import docker
 from docker.errors import APIError, NotFound
 from docker.models.containers import Container
-from requests.exceptions import ReadTimeout
+from requests.exceptions import ReadTimeout, ConnectionError
 
 from core.runners.base import ExecutionResult
 
@@ -52,11 +52,14 @@ class DockerSandboxWrapper:
             exit_code = int(wait_result.get("StatusCode", 1))
             stdout = self._decode_logs(container, stdout=True, stderr=False)
             stderr = self._decode_logs(container, stdout=False, stderr=True)
-        except ReadTimeout:
+        except (ReadTimeout, ConnectionError, APIError):
             exit_code = self._TIMEOUT_EXIT_CODE
             if container is not None:
-                stdout = self._decode_logs(container, stdout=True, stderr=False)
-                stderr = self._decode_logs(container, stdout=False, stderr=True)
+                try:
+                    stdout = self._decode_logs(container, stdout=True, stderr=False)
+                    stderr = self._decode_logs(container, stdout=False, stderr=True)
+                except Exception:
+                    pass
                 self._kill_container(container)
             if not stderr.strip():
                 stderr = f"Execution exceeded timeout of {timeout}s"

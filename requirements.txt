@@ -1,4 +1,12 @@
-chromadb
+fastapi
+uvicorn
+pydantic
 docker
-ollama
+requests
+chromadb
 sentence-transformers
+matplotlib
+torch
+transformers
+datasets
+peft
