@@ -126,15 +126,21 @@ The tracer layer (`agent/telemetry.py`) records execution graphs per job.
 
 **Code Mutation Magnitude** — Measures how structurally different the patched code is from the initial broken snapshot:
 
-$$\Delta\text{Code Similarity} = 1.0 - \text{SequenceMatcher}(\text{initial\_code},\ \text{patched\_code}).\text{ratio}()$$
+```
+ΔCode Similarity = 1.0 - SequenceMatcher(initial_code, patched_code).ratio()
+```
 
 **Token Expenditure Estimate** — Character-to-token heuristic for local offline endpoint usage:
 
-$$\text{Estimated Tokens} = \frac{\text{Length of String in Characters}}{4}$$
+```
+Estimated Tokens = len(string) / 4
+```
 
 **Token Expenditure Efficiency Score** — Combined resource optimization weight:
 
-$$\text{Token Expenditure Efficiency Score} = \frac{\Delta\text{Code Similarity}}{\text{Total Combined Tokens Expended}} \times 1000$$
+```
+Efficiency Score = (ΔCode Similarity / Total Tokens Expended) × 1000
+```
 
 ---
 
