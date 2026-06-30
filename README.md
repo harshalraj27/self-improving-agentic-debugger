@@ -51,13 +51,13 @@ The system separates its **Control Plane** (state management and orchestration) 
 
 ### Core Subsystems
 
-| Plane | Component | Role |
-|---|---|---|
-| Control | FSM Orchestrator | Drives a closed-loop, event-driven state machine via a lightweight transition engine. Eliminates loop deadlocks by enforcing deterministic state changes via explicit execution tokens. |
-| Compute | Isolation Sandbox | Abstracts language runtimes through a unified factory runner. All compilation and execution cycles run inside temporary, unprivileged Docker containers. |
-| Memory | Vector RAG Core | Indexes successful multi-step trajectory repairs into a vector space, surfacing past solutions to inform current debugging passes. |
-| Data | Telemetry Tracer | Profiles state execution intervals, code mutation magnitude, and token expenditure per job. |
-| Learning | Dataset & Tuning Pipeline | Curates successful multi-turn trajectory logs into ShareGPT format and runs parameter-efficient optimization via low-rank adapters. |
+| Plane    | Component                 | Role                                                                                                                                                                                    |
+| -------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Control  | FSM Orchestrator          | Drives a closed-loop, event-driven state machine via a lightweight transition engine. Eliminates loop deadlocks by enforcing deterministic state changes via explicit execution tokens. |
+| Compute  | Isolation Sandbox         | Abstracts language runtimes through a unified factory runner. All compilation and execution cycles run inside temporary, unprivileged Docker containers.                                |
+| Memory   | Vector RAG Core           | Indexes successful multi-step trajectory repairs into a vector space, surfacing past solutions to inform current debugging passes.                                                      |
+| Data     | Telemetry Tracer          | Profiles state execution intervals, code mutation magnitude, and token expenditure per job.                                                                                             |
+| Learning | Dataset & Tuning Pipeline | Curates successful multi-turn trajectory logs into ShareGPT format and runs parameter-efficient optimization via low-rank adapters.                                                     |
 
 ---
 
@@ -71,28 +71,24 @@ Untrusted code is mounted and executed via the Docker SDK inside an isolated Lin
 - **Volume isolation:** Target directories are absolute-resolved and mounted as read-only (`mode: "ro"`).
 - **Chained execution (C++):** Multi-step workflows (compile + run) are piped into a single bash payload that redirects outputs to an isolated scratch partition:
 
-```bash
+```
 /bin/sh -c "g++ -Wall target.cpp -o /tmp/temp_exec && /tmp/temp_exec"
 ```
 
 - **Fault-tolerant named pipes:** Windows pipe connection drops (`ConnectionError` / `ReadTimeout`) on hard processing timeouts are caught, the runaway process is force-killed, and the lifecycle state maps to POSIX exit code `124`.
 
----
-
 ### 2. Event-Driven Finite State Machine
 
 The agent loop transitions across a strict state graph via Python pattern matching, avoiding the fragility of generic prompt chains.
 
-| State | Action |
-|---|---|
-| `READY` | Invokes `RunnerFactory` to map the runtime context and trigger containerized execution. |
-| `OBSERVED` | Evaluates the captured `ExecutionResult` to trigger either a progress or halting vector. |
-| `EVALUATED` | Reads fresh file text from disk and queries vector memory for context injection. |
-| `ACTION_SELECTED` | Queries the local Ollama daemon (`qwen2.5-coder:7b`) with temperature locked to `0.0`. |
-| `ACTED` | Applies regex parsing to isolate the code fence and overwrites the disk scratch path in-place. |
-| `TERMINATED` | Sink state — resource de-allocation, metric calculation, and trajectory dataset serialization. |
-
----
+| State             | Action                                                                                         |
+| ----------------- | ---------------------------------------------------------------------------------------------- |
+| `READY`           | Invokes `RunnerFactory` to map the runtime context and trigger containerized execution.        |
+| `OBSERVED`        | Evaluates the captured `ExecutionResult` to trigger either a progress or halting vector.       |
+| `EVALUATED`       | Reads fresh file text from disk and queries vector memory for context injection.               |
+| `ACTION_SELECTED` | Queries the local Ollama daemon (`qwen2.5-coder:7b`) with temperature locked to `0.0`.         |
+| `ACTED`           | Applies regex parsing to isolate the code fence and overwrites the disk scratch path in-place. |
+| `TERMINATED`      | Sink state — resource de-allocation, metric calculation, and trajectory dataset serialization. |
 
 ### 3. Vector Memory Cache
 
@@ -101,8 +97,6 @@ When a complex exception is resolved across multiple iterations, the initial `st
 - **Semantic vectorization:** Raw text maps to a 384-dimensional dense vector using `all-MiniLM-L6-v2` (SentenceTransformers).
 - **Heuristic filter gate:** Distance lookups apply a cosine similarity threshold (≤ 0.55) to prevent false-positive context injection.
 
----
-
 ### 4. Async Multi-Tenant Web Gateway
 
 The platform implements an async job-polling pattern via FastAPI and Uvicorn.
@@ -110,13 +104,29 @@ The platform implements an async job-polling pattern via FastAPI and Uvicorn.
 - Multi-tenant payloads are ingested via async endpoints, mapped to unique filesystem workspaces, and offloaded to worker pools via `BackgroundTasks`.
 - Clients receive an immediate `202 Accepted` tracking token.
 
----
-
 ### 5. Trajectory Curation & PEFT Fine-Tuning
 
 **`build_dataset.py`** — Processes raw telemetry logs, isolates successful traces, parses prompt-response pairs from `ACTION_SELECTED` frames, and compiles them into a ShareGPT JSONL dataset.
 
 **`finetune.py`** — Runs a parameter-efficient training harness targeting base models (e.g., `Qwen/Qwen2.5-Coder-1.5B`). Features `bfloat16`/`fp16` precision, gradient checkpointing, and LoRA adapters targeting attention layers (`q_proj`, `v_proj`, `k_proj`, `o_proj`).
+
+---
+
+## Design Decisions & Trade-offs
+
+I built this in five layers, each replacing a simpler approach I tried first and abandoned for a specific reason.
+
+**FSM orchestration.** My first version was a plain while-loop calling the LLM repeatedly until the code ran clean. It worked on easy bugs but had no principled way to detect that it was stuck retrying the same broken fix, or to recover cleanly from a malformed patch. I replaced it with an event-driven FSM using Python's structural pattern matching (`match`/`case`) over explicit state objects — `READY → OBSERVED → EVALUATED → ACTION_SELECTED → ACTED → TERMINATED`. Each transition is a deterministic function of the current state and the last execution result, so there's no ambiguity about what happens next and no risk of looping indefinitely.
+
+**Docker sandboxing.** Running LLM-generated code directly on my own machine was a non-starter — a bad patch could do anything, and I had no way to bound that risk with a plain subprocess call. I isolated execution into transient containers (`python:3.11-slim`) with the network disabled, a 128MB memory ceiling, a non-root `sandbox_user`, and read-only volume mounts. I hit a specific bug while testing this on Windows: named-pipe connections to the Docker daemon would silently drop mid-execution (`ConnectionError` / `ReadTimeout`) on longer C++ compiles, crashing the run with no usable error message. I added a wrapper that catches that specific failure mode, force-kills the container, and maps it to a clean POSIX exit code `124` (timeout) instead of an unhandled exception.
+
+**Vector memory (RAG cache).** Without memory, every recurring exception — the same `IndexError` pattern showing up across different test files, for instance — triggered a full multi-turn debugging loop from scratch every time. I indexed each resolved exception's `stderr` output alongside its working patch into ChromaDB using `all-MiniLM-L6-v2` embeddings, gated by a cosine similarity threshold of ≤ 0.55 so a weak match doesn't get injected as if it were relevant context. This is the layer I validated most carefully: token efficiency went from 0.04 on a cache miss to 0.66 on a cache hit (a 16.5x improvement), and retries on repeat exceptions dropped from ~1.25 cycles to 1.0.
+
+**Async API gateway.** I originally ran this as a blocking CLI script — one debugging session at a time, no way to exercise concurrent load. I rebuilt the entry point as a FastAPI + Uvicorn service: each submission gets its own filesystem workspace, gets queued via `BackgroundTasks`, and the client gets back an immediate `202 Accepted` tracking token instead of blocking on the full debug loop.
+
+**Telemetry.** Early on I was eyeballing print statements to judge whether a run was making progress, which made it impossible to compare runs systematically or spot which exception types were expensive. `agent/telemetry.py` now tracks per-job latency, code mutation magnitude (sequence similarity between the input and patched code, via `difflib.SequenceMatcher`), and the token efficiency score described above — this is what the evaluation suite aggregates into `evaluation_report.md`.
+
+**Fine-tuning pipeline.** Once enough successful trajectories were logged, I built `train/build_dataset.py` to convert them into ShareGPT-format JSONL, and `train/finetune.py` to run LoRA fine-tuning on `Qwen2.5-Coder-1.5B` (targeting `q_proj`/`v_proj`/`k_proj`/`o_proj`, with bf16/fp16 precision and gradient checkpointing) so it stays runnable on a single consumer GPU.
 
 ---
 
@@ -155,31 +165,31 @@ Efficiency Score = (ΔCode Similarity / Total Tokens Expended) × 1000
 
 ### Sample Report (`evaluation_report.md`)
 
-**High-Level Performance**
+**High-Level Performance** *(n = 18 test scripts)*
 
-| Metric | Value |
-|---|---|
-| Overall System Convergence Rate | 88.89% |
-| Average Python Latency | 3705.14 ms |
-| Average C++ Latency | 62187.46 ms |
+| Metric                          | Value       |
+| ------------------------------- | ----------- |
+| Overall System Convergence Rate | 88.89%      |
+| Average Python Latency          | 3705.14 ms  |
+| Average C++ Latency             | 62187.46 ms |
 
 **RAG Cache Impact**
 
-| Metric | Cache Hits | Cache Misses |
-|---|---|---|
-| Average Retry Loop Allocation | 1.00 cycles | 1.25 cycles |
-| Token Expenditure Efficiency Score | 0.66 | 0.04 |
+| Metric                             | Cache Hits  | Cache Misses |
+| ----------------------------------- | ----------- | ------------ |
+| Average Retry Loop Allocation      | 1.00 cycles | 1.25 cycles  |
+| Token Expenditure Efficiency Score | 0.66        | 0.04         |
 
 ---
 
 ## Supported Exception Profiles
 
-| Category | Examples |
-|---|---|
-| Syntax Breaks | Missing definitions, trailing block errors, invalid syntax boundaries |
-| Name Crashes | Reference faults, uninitialized variables (`NameError`) |
-| Type Inconsistencies | Multi-type concatenations, illegal primitive conversions (`TypeError`) |
-| Boundary Exceptions | Out-of-bounds iterable operations, key mapping misses (`IndexError`, `KeyError`) |
+| Category             | Examples                                                                         |
+| --------------------- | ---------------------------------------------------------------------------------- |
+| Syntax Breaks        | Missing definitions, trailing block errors, invalid syntax boundaries            |
+| Name Crashes         | Reference faults, uninitialized variables (`NameError`)                          |
+| Type Inconsistencies | Multi-type concatenations, illegal primitive conversions (`TypeError`)           |
+| Boundary Exceptions  | Out-of-bounds iterable operations, key mapping misses (`IndexError`, `KeyError`) |
 
 ---
 
@@ -226,30 +236,6 @@ agentic-debugger/
 
 ---
 
-## What Changed
-
-The original project was a stateless outline — no real execution, no memory, no sandboxing. Here's what was built on top of it.
-
-**FSM orchestration (was: simulated stubs)**
-Ripped out the fake execution wheels and replaced them with a real event-driven FSM. States transition via Python pattern matching — `READY` → `OBSERVED` → `EVALUATED` and so on. No loose prompt chains, no state drift, no getting stuck in a loop.
-
-**Docker sandboxing + Windows pipe handling (was: local script execution)**
-Moved all code execution into Docker containers via the SDK. Volumes mount read-only, containers run as a non-root `sandbox_user`, memory is capped at 128MB, network is off. On Windows, named-pipe drops mid-execution (`ConnectionError` / `ReadTimeout`) were silently crashing runs — added a wrapper that catches those, kills the container cleanly, and surfaces a POSIX `124` timeout instead.
-
-**Async API gateway (was: blocking CLI)**
-Rewrote the entry point as a FastAPI + Uvicorn service. Each submission gets its own workspace, gets queued via `BackgroundTasks`, and returns a `202` immediately. No blocking, no queuing issues under parallel load.
-
-**Telemetry (was: print statements)**
-`agent/telemetry.py` now tracks per-job latency, code mutation magnitude (sequence similarity between input and patched output), and a token efficiency score. Useful for spotting which exception types cost the most.
-
-**Vector memory / RAG (was: none)**
-Each successfully resolved exception gets its `stderr` + working patch indexed into ChromaDB using `all-MiniLM-L6-v2`. On future runs, similar errors pull from cache instead of burning through retry cycles. The cosine similarity gate sits at ≤ 0.55 — below that it ignores the match rather than risk a bad injection. In benchmarks this pushed token efficiency from 0.04 to 0.66 — a **16.5x improvement** — and cut retries on repeat exceptions to a single cycle.
-
-**Fine-tuning pipeline (was: none)**
-`train/build_dataset.py` pulls successful traces out of telemetry logs and formats them as ShareGPT JSONL. `train/finetune.py` runs LoRA fine-tuning on top of `Qwen2.5-Coder-1.5B` — `bfloat16`/`fp16` and gradient checkpointing keep it runnable on consumer hardware.
-
----
-
 ## Dependencies
 
 - **Python 3.11+**
@@ -265,7 +251,7 @@ Each successfully resolved exception gets its `stderr` + working patch indexed i
 
 Clone the repo, create a virtual environment, and install:
 
-```bash
+```
 python -m venv .venv
 source .venv/bin/activate       # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -273,47 +259,39 @@ pip install -r requirements.txt
 
 Pull the inference model:
 
-```bash
+```
 ollama pull qwen2.5-coder:7b
 ```
-
----
 
 ### 2. Seed the Benchmarks
 
 If `data/benchmarks/` is empty:
 
-```bash
+```
 python generate_benchmarks.py
 ```
-
----
 
 ### 3. Run the Evaluation Suite
 
 Runs the FSM across all 18 test scripts in Docker, collects metrics, and writes the charts:
 
-```bash
+```
 python -m agent.evaluate
 ```
 
 Outputs: `evaluation_report.md` (convergence metrics) and `analytics_chart.png` (latency vs. retry boundaries).
 
----
-
 ### 4. Start the Web Gateway
 
-```bash
+```
 uvicorn app:app --reload --port 8000
 ```
 
 Swagger UI at `http://127.0.0.1:8000/docs`.
 
----
-
 ### 5. Fine-Tuning
 
-```bash
+```
 # Build the dataset from telemetry logs
 python -m train.build_dataset
 
